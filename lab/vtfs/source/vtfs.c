@@ -18,6 +18,9 @@ MODULE_AUTHOR("secs-dev");
 MODULE_DESCRIPTION("A simple FS kernel module");
 
 #define LOG(fmt, ...) pr_info("[" MODULE_NAME "]: " fmt, ##__VA_ARGS__)
+static unsigned int vtfs_mask = 0;
+#define VTFS_HAS_TEST   (1u << 0)  // test.txt
+#define VTFS_HAS_NEW    (1u << 1)  // new_file.txt
 
 // Forward declarations
 static int vtfs_fill_super(struct super_block *sb, void *data, int silent);
@@ -38,6 +41,9 @@ static struct dentry *vtfs_lookup(struct inode *parent_inode,
 
   // Root directory contains: test.txt (101) and dir (200)
   if (ino == 1000 && strcmp(name, "test.txt") == 0) {
+    if (!(vtfs_mask & VTFS_HAS_TEST))
+      return NULL;
+
     struct inode *inode = vtfs_get_inode(parent_inode->i_sb,
                                          parent_inode,
                                          S_IFREG | 0777,
@@ -45,6 +51,16 @@ static struct dentry *vtfs_lookup(struct inode *parent_inode,
     if (!inode)
       return ERR_PTR(-ENOMEM);
 
+    d_add(child_dentry, inode);
+    return NULL;
+  }
+
+  if (ino == 1000 && strcmp(name, "new_file.txt") == 0) {
+    if (!(vtfs_mask & VTFS_HAS_NEW))
+      return NULL;
+    struct inode *inode = vtfs_get_inode(parent_inode->i_sb, parent_inode,
+                                        S_IFREG | 0777, 102);
+    if (!inode) return ERR_PTR(-ENOMEM);
     d_add(child_dentry, inode);
     return NULL;
   }
@@ -64,6 +80,63 @@ static struct dentry *vtfs_lookup(struct inode *parent_inode,
   return NULL;
 }
 
+static int vtfs_create(struct mnt_idmap *idmap,
+                       struct inode *parent_inode,
+                       struct dentry *child_dentry,
+                       umode_t mode,
+                       bool excl) {
+  (void)idmap;
+  (void)mode;
+  (void)excl;
+
+  if (parent_inode->i_ino != 1000)
+    return -EPERM;
+
+  const char *name = child_dentry->d_name.name;
+
+  if (strcmp(name, "test.txt") == 0) {
+    struct inode *inode = vtfs_get_inode(parent_inode->i_sb, parent_inode,
+                                         S_IFREG | 0777, 101);
+    if (!inode) return -ENOMEM;
+
+    d_add(child_dentry, inode);
+    vtfs_mask |= VTFS_HAS_TEST;
+    return 0;
+  }
+
+  if (strcmp(name, "new_file.txt") == 0) {
+    struct inode *inode = vtfs_get_inode(parent_inode->i_sb, parent_inode,
+                                         S_IFREG | 0777, 102);
+    if (!inode) return -ENOMEM;
+
+    d_add(child_dentry, inode);
+    vtfs_mask |= VTFS_HAS_NEW;
+    return 0;
+  }
+
+  // We only allow creating these 2 files in this simple lab step
+  return -EACCES;
+}
+
+static int vtfs_unlink(struct inode *parent_inode, struct dentry *child_dentry) {
+  if (parent_inode->i_ino != 1000)
+    return -EPERM;
+
+  const char *name = child_dentry->d_name.name;
+
+  if (strcmp(name, "test.txt") == 0) {
+    vtfs_mask &= ~VTFS_HAS_TEST;
+    return 0;
+  }
+
+  if (strcmp(name, "new_file.txt") == 0) {
+    vtfs_mask &= ~VTFS_HAS_NEW;
+    return 0;
+  }
+
+  return -ENOENT;
+}
+
 static int vtfs_iterate_shared(struct file *filp, struct dir_context *ctx) {
   struct dentry *dentry = filp->f_path.dentry;
   struct inode  *inode  = dentry->d_inode;
@@ -72,18 +145,30 @@ static int vtfs_iterate_shared(struct file *filp, struct dir_context *ctx) {
   if (!dir_emit_dots(filp, ctx))
     return 0;
 
-  // Root directory: show test.txt + dir
+  // Root directory: show files based on vtfs_mask + always show dir
   if (ino == 1000) {
     if (ctx->pos == 2) {
-      if (!dir_emit(ctx, "test.txt", strlen("test.txt"), 101, DT_REG))
-        return 0;
+      if (vtfs_mask & VTFS_HAS_TEST) {
+        if (!dir_emit(ctx, "test.txt", strlen("test.txt"), 101, DT_REG))
+          return 0;
+      }
       ctx->pos++;
     }
+
     if (ctx->pos == 3) {
+      if (vtfs_mask & VTFS_HAS_NEW) {
+        if (!dir_emit(ctx, "new_file.txt", strlen("new_file.txt"), 102, DT_REG))
+          return 0;
+      }
+      ctx->pos++;
+    }
+
+    if (ctx->pos == 4) {
       if (!dir_emit(ctx, "dir", strlen("dir"), 200, DT_DIR))
         return 0;
       ctx->pos++;
     }
+
     return 0;
   }
 
@@ -103,6 +188,8 @@ static const struct file_operations vtfs_dir_ops = {
 
 static const struct inode_operations vtfs_inode_ops = {
   .lookup = vtfs_lookup,
+  .create = vtfs_create,
+  .unlink = vtfs_unlink,
 };
 
 static const struct inode_operations vtfs_file_inode_ops = {
@@ -113,16 +200,16 @@ static struct inode *vtfs_get_inode(struct super_block *sb,
                                     const struct inode *dir,
                                     umode_t mode, int i_ino) {
   struct inode *inode = new_inode(sb);
-  if (inode != NULL) {
-    inode_init_owner(&nop_mnt_idmap, inode, dir, mode);
-    inode->i_op = &vtfs_inode_ops;
+  if (!inode)
+    return NULL;
 
-    if (S_ISDIR(mode)) {
-      inode->i_op  = &vtfs_inode_ops;
-      inode->i_fop = &vtfs_dir_ops;
-    } else {
-      inode->i_op  = &vtfs_file_inode_ops;
-    }
+  inode_init_owner(&nop_mnt_idmap, inode, dir, mode);
+
+  if (S_ISDIR(mode)) {
+    inode->i_op  = &vtfs_inode_ops;
+    inode->i_fop = &vtfs_dir_ops;
+  } else {
+    inode->i_op  = &vtfs_file_inode_ops;
   }
 
   inode->i_ino = i_ino;
@@ -134,6 +221,8 @@ static int vtfs_fill_super(struct super_block *sb, void *data, int silent) {
   (void)silent;
 
   struct inode *inode = vtfs_get_inode(sb, NULL, S_IFDIR | 0777, 1000);
+  if (!inode)
+    return -ENOMEM;
 
   sb->s_root = d_make_root(inode);
   if (sb->s_root == NULL) {
