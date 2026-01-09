@@ -33,11 +33,11 @@ static struct dentry *vtfs_lookup(struct inode *parent_inode,
                                   unsigned int flag) {
   (void)flag;
 
-  // Only root directory will contain our fake file for now
-  if (parent_inode->i_ino != 1000)
-    return NULL;
+  ino_t ino = parent_inode->i_ino;
+  const char *name = child_dentry->d_name.name;
 
-  if (strcmp(child_dentry->d_name.name, "test.txt") == 0) {
+  // Root directory contains: test.txt (101) and dir (200)
+  if (ino == 1000 && strcmp(name, "test.txt") == 0) {
     struct inode *inode = vtfs_get_inode(parent_inode->i_sb,
                                          parent_inode,
                                          S_IFREG | 0777,
@@ -45,26 +45,54 @@ static struct dentry *vtfs_lookup(struct inode *parent_inode,
     if (!inode)
       return ERR_PTR(-ENOMEM);
 
-    d_add(child_dentry, inode);   // attach inode to this dentry
-    return NULL;                  // VFS expects NULL on success
+    d_add(child_dentry, inode);
+    return NULL;
+  }
+
+  if (ino == 1000 && strcmp(name, "dir") == 0) {
+    struct inode *inode = vtfs_get_inode(parent_inode->i_sb,
+                                         parent_inode,
+                                         S_IFDIR | 0777,
+                                         200);
+    if (!inode)
+      return ERR_PTR(-ENOMEM);
+
+    d_add(child_dentry, inode);
+    return NULL;
   }
 
   return NULL;
 }
 
 static int vtfs_iterate_shared(struct file *filp, struct dir_context *ctx) {
-  // Emit "." and ".." automatically based on ctx->pos
+  struct dentry *dentry = filp->f_path.dentry;
+  struct inode  *inode  = dentry->d_inode;
+  ino_t ino = inode->i_ino;
+
   if (!dir_emit_dots(filp, ctx))
     return 0;
 
-  // After dots, ctx->pos is typically >= 2.
-  // We add one fake file: test.txt (inode 101)
-  if (ctx->pos == 2) {
-    if (!dir_emit(ctx, "test.txt", strlen("test.txt"), 101, DT_REG))
-      return 0;
-    ctx->pos++;
+  // Root directory: show test.txt + dir
+  if (ino == 1000) {
+    if (ctx->pos == 2) {
+      if (!dir_emit(ctx, "test.txt", strlen("test.txt"), 101, DT_REG))
+        return 0;
+      ctx->pos++;
+    }
+    if (ctx->pos == 3) {
+      if (!dir_emit(ctx, "dir", strlen("dir"), 200, DT_DIR))
+        return 0;
+      ctx->pos++;
+    }
+    return 0;
   }
 
+  // /dir (ino 200): for now it's empty (only "." and "..")
+  if (ino == 200) {
+    return 0;
+  }
+
+  // Any other directories: empty
   return 0;
 }
 
