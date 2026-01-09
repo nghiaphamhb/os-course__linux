@@ -2,33 +2,14 @@
 #include <linux/module.h>
 #include <linux/printk.h>
 
-#define MODULE_NAME "vtfs"
-
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("secs-dev");
-MODULE_DESCRIPTION("A simple FS kernel module");
-
-#define LOG(fmt, ...) pr_info("[" MODULE_NAME "]: " fmt, ##__VA_ARGS__)
-
-static int __init vtfs_init(void) {
-  LOG("VTFS joined the kernel\n");
-  return 0;
-}
-
-static void __exit vtfs_exit(void) {
-  LOG("VTFS left the kernel\n");
-}
-
-module_init(vtfs_init);
-module_exit(vtfs_exit);
-#include <linux/init.h>
-#include <linux/module.h>
-#include <linux/printk.h>
 #include <linux/fs.h>        // file_system_type, super_block, inode, register_filesystem...
 #include <linux/pagemap.h>   // d_make_root
 #include <linux/stat.h>      // S_IFDIR
 #include <linux/errno.h>     // -ENOMEM
-#include <linux/mount.h>
+#include <linux/mount.h>     // nop_mnt_idmap
+#include <linux/uaccess.h>
+#include <linux/string.h>
+#include <linux/dirent.h>
 
 #define MODULE_NAME "vtfs"
 
@@ -38,11 +19,67 @@ MODULE_DESCRIPTION("A simple FS kernel module");
 
 #define LOG(fmt, ...) pr_info("[" MODULE_NAME "]: " fmt, ##__VA_ARGS__)
 
-
+// Forward declarations
 static int vtfs_fill_super(struct super_block *sb, void *data, int silent);
 static struct dentry *vtfs_mount(struct file_system_type *fs_type, int flags,
                                  const char *token, void *data);
 static void vtfs_kill_sb(struct super_block *sb);
+static struct inode *vtfs_get_inode(struct super_block *sb,
+                                    const struct inode *dir,
+                                    umode_t mode, int i_ino);
+
+static struct dentry *vtfs_lookup(struct inode *parent_inode,
+                                  struct dentry *child_dentry,
+                                  unsigned int flag) {
+  (void)flag;
+
+  // Only root directory will contain our fake file for now
+  if (parent_inode->i_ino != 1000)
+    return NULL;
+
+  if (strcmp(child_dentry->d_name.name, "test.txt") == 0) {
+    struct inode *inode = vtfs_get_inode(parent_inode->i_sb,
+                                         parent_inode,
+                                         S_IFREG | 0777,
+                                         101);
+    if (!inode)
+      return ERR_PTR(-ENOMEM);
+
+    d_add(child_dentry, inode);   // attach inode to this dentry
+    return NULL;                  // VFS expects NULL on success
+  }
+
+  return NULL;
+}
+
+static int vtfs_iterate_shared(struct file *filp, struct dir_context *ctx) {
+  // Emit "." and ".." automatically based on ctx->pos
+  if (!dir_emit_dots(filp, ctx))
+    return 0;
+
+  // After dots, ctx->pos is typically >= 2.
+  // We add one fake file: test.txt (inode 101)
+  if (ctx->pos == 2) {
+    if (!dir_emit(ctx, "test.txt", strlen("test.txt"), 101, DT_REG))
+      return 0;
+    ctx->pos++;
+  }
+
+  return 0;
+}
+
+static const struct file_operations vtfs_dir_ops = {
+  .owner = THIS_MODULE,
+  .iterate_shared = vtfs_iterate_shared,
+};
+
+static const struct inode_operations vtfs_inode_ops = {
+  .lookup = vtfs_lookup,
+};
+
+static const struct inode_operations vtfs_file_inode_ops = {
+  // empty for now
+};
 
 static struct inode *vtfs_get_inode(struct super_block *sb,
                                     const struct inode *dir,
@@ -50,6 +87,14 @@ static struct inode *vtfs_get_inode(struct super_block *sb,
   struct inode *inode = new_inode(sb);
   if (inode != NULL) {
     inode_init_owner(&nop_mnt_idmap, inode, dir, mode);
+    inode->i_op = &vtfs_inode_ops;
+
+    if (S_ISDIR(mode)) {
+      inode->i_op  = &vtfs_inode_ops;
+      inode->i_fop = &vtfs_dir_ops;
+    } else {
+      inode->i_op  = &vtfs_file_inode_ops;
+    }
   }
 
   inode->i_ino = i_ino;
@@ -57,7 +102,10 @@ static struct inode *vtfs_get_inode(struct super_block *sb,
 }
 
 static int vtfs_fill_super(struct super_block *sb, void *data, int silent) {
-  struct inode *inode = vtfs_get_inode(sb, NULL, S_IFDIR, 1000);
+  (void)data;
+  (void)silent;
+
+  struct inode *inode = vtfs_get_inode(sb, NULL, S_IFDIR | 0777, 1000);
 
   sb->s_root = d_make_root(inode);
   if (sb->s_root == NULL) {
@@ -70,6 +118,8 @@ static int vtfs_fill_super(struct super_block *sb, void *data, int silent) {
 
 static struct dentry *vtfs_mount(struct file_system_type *fs_type, int flags,
                                  const char *token, void *data) {
+  (void)token;
+
   struct dentry *ret = mount_nodev(fs_type, flags, data, vtfs_fill_super);
   if (ret == NULL) {
     LOG("Can't mount file system\n");
@@ -80,6 +130,7 @@ static struct dentry *vtfs_mount(struct file_system_type *fs_type, int flags,
 }
 
 static void vtfs_kill_sb(struct super_block *sb) {
+  (void)sb;
   LOG("vtfs super block is destroyed. Unmount successfully.\n");
 }
 
