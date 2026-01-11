@@ -14,6 +14,7 @@
 #include <linux/string.h>   // strcmp/strlen
 
 #define MODULE_NAME "vtfs"
+#define VTFS_MAGIC 0x56544653  // "VTFS"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("secs-dev");
@@ -54,16 +55,21 @@ struct vtfs_node {
   };
 };
 
+static struct vtfs_node *vtfs_root_node = NULL;
 static DEFINE_MUTEX(vtfs_tree_lock);
 
-static ino_t vtfs_next_ino = 300;
-static ino_t vtfs_alloc_ino(void) {
-  return vtfs_next_ino++;
+static ino_t *vtfs_ino_counter(void) {
+  static ino_t vtfs_next_ino = 300;
+  return &vtfs_next_ino;
 }
 
-static struct vtfs_node *vtfs_root_node = NULL;
+static void vtfs_reset_ino(void) {
+  *vtfs_ino_counter() = 300;
+}
 
-#define VTFS_MAGIC 0x56544653  // "VTFS"
+static ino_t vtfs_alloc_ino(void) {
+  return (*vtfs_ino_counter())++;
+}
 
 static const struct super_operations vtfs_super_ops = {
   .statfs     = simple_statfs,
@@ -81,7 +87,10 @@ static struct vtfs_node *vtfs_node_new(const char *name,
   n->type = type;
   n->ino = ino;
   n->mode = mode;
-  strscpy(n->name, name, sizeof(n->name));
+  if (strscpy(n->name, name, sizeof(n->name)) < 0) {
+    kfree(n);
+    return ERR_PTR(-ENAMETOOLONG);
+  }
 
   if (type == VTFS_DIR) {
     n->as_dir.parent = NULL;
@@ -172,19 +181,27 @@ static void vtfs_node_free_tree(struct vtfs_node *n) {
 }
 
 static int vtfs_backend_init(void) {
-  vtfs_next_ino = 300;
+  vtfs_reset_ino();
 
   // root (not stored as a named entry)
   vtfs_root_node = vtfs_node_new("", VTFS_DIR, 1000, S_IFDIR | 0777);
-  if (!vtfs_root_node) return -ENOMEM;
+  if (IS_ERR(vtfs_root_node))
+    return PTR_ERR(vtfs_root_node);
+  if (!vtfs_root_node)
+    return -ENOMEM;
 
-  // Create /dir by default (like previous parts)
   struct vtfs_node *dir = vtfs_node_new("dir", VTFS_DIR, 200, S_IFDIR | 0777);
+  if (IS_ERR(dir)) {
+    vtfs_node_free_tree(vtfs_root_node);
+    vtfs_root_node = NULL;
+    return PTR_ERR(dir);
+  }
   if (!dir) {
     vtfs_node_free_tree(vtfs_root_node);
     vtfs_root_node = NULL;
     return -ENOMEM;
   }
+
   vtfs_node_add_child(vtfs_root_node, dir);
 
   return 0;
@@ -260,6 +277,11 @@ static int vtfs_create(struct mnt_idmap *idmap,
   }
 
   child = vtfs_node_new(name, VTFS_FILE, vtfs_alloc_ino(), S_IFREG | 0777);
+  if (IS_ERR(child)) {
+    int err = PTR_ERR(child);
+    mutex_unlock(&vtfs_tree_lock);
+    return err;
+  }
   if (!child) {
     mutex_unlock(&vtfs_tree_lock);
     return -ENOMEM;
@@ -318,6 +340,11 @@ static int vtfs_mkdir(struct mnt_idmap *idmap,
   }
 
   child = vtfs_node_new(name, VTFS_DIR, vtfs_alloc_ino(), S_IFDIR | 0777);
+  if (IS_ERR(child)) {
+    int err = PTR_ERR(child);
+    mutex_unlock(&vtfs_tree_lock);
+    return err;
+  }
   if (!child) {
     mutex_unlock(&vtfs_tree_lock);
     return -ENOMEM;
