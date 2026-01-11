@@ -26,22 +26,32 @@ enum vtfs_node_type {
   VTFS_DIR = 1,
   VTFS_FILE = 2,
 };
-
-struct vtfs_node {
-  enum vtfs_node_type type;
-  ino_t ino;
-  umode_t mode;
-
-  char name[64];
-
+// Entries
+struct vtfs_child {
+  struct vtfs_node *node;
+  struct vtfs_child *next;
+};
+struct vtfs_dir {
   // For directories: linked list of children
   struct vtfs_node *parent;
-  struct vtfs_node *children; // head
+  struct vtfs_child *children; // head of entries
   struct vtfs_node *next;     // sibling link
-
+};
+struct vtfs_file {
   // For files: data buffer in RAM (not used yet)
   char *data;
   size_t size;
+};
+struct vtfs_node {
+  ino_t ino;
+  umode_t mode;
+  char name[64];
+  
+  enum vtfs_node_type type;
+  union {
+    struct vtfs_dir as_dir;
+    struct vtfs_file as_file;
+  };
 };
 
 static DEFINE_MUTEX(vtfs_tree_lock);
@@ -71,60 +81,93 @@ static struct vtfs_node *vtfs_node_new(const char *name,
   n->type = type;
   n->ino = ino;
   n->mode = mode;
-
-  // Safe copy
   strscpy(n->name, name, sizeof(n->name));
+
+  if (type == VTFS_DIR) {
+    n->as_dir.parent = NULL;
+    n->as_dir.children = NULL;
+    n->as_dir.next = NULL;
+  } else {
+    n->as_file.data = NULL;
+    n->as_file.size = 0;
+  }
+
   return n;
 }
 
-static void vtfs_node_add_child(struct vtfs_node *dir, struct vtfs_node *child) {
-  child->parent = dir;
-  child->next = dir->children;
-  dir->children = child;
+static int vtfs_node_add_child(struct vtfs_node *dir, struct vtfs_node *child) {
+  struct vtfs_child *e;
+
+  if (!dir || dir->type != VTFS_DIR) return -ENOTDIR;
+
+  e = kmalloc(sizeof(*e), GFP_KERNEL);
+  if (!e) return -ENOMEM;
+
+  e->node = child;
+  e->next = dir->as_dir.children;
+  dir->as_dir.children = e;
+
+  if (child->type == VTFS_DIR)
+    child->as_dir.parent = dir;
+
+  return 0;
 }
 
-static struct vtfs_node *vtfs_node_find_child(struct vtfs_node *dir,
-                                              const char *name) {
-  struct vtfs_node *it;
-  for (it = dir->children; it != NULL; it = it->next) {
-    if (strcmp(it->name, name) == 0)
-      return it;
+static struct vtfs_node *vtfs_node_find_child(struct vtfs_node *dir, const char *name) {
+  struct vtfs_child *e;
+
+  if (!dir || dir->type != VTFS_DIR) return NULL;
+
+  for (e = dir->as_dir.children; e; e = e->next) {
+    if (strcmp(e->node->name, name) == 0)
+      return e->node;
   }
   return NULL;
 }
 
 static int vtfs_node_remove_child(struct vtfs_node *dir, const char *name) {
-  struct vtfs_node *prev = NULL;
-  struct vtfs_node *it = dir->children;
+  struct vtfs_child *prev = NULL, *e;
 
-  while (it) {
-    if (strcmp(it->name, name) == 0) {
-      if (prev) prev->next = it->next;
-      else dir->children = it->next;
+  if (!dir || dir->type != VTFS_DIR) return -ENOTDIR;
 
-      // Free file data if present
-      if (it->data) kfree(it->data);
-      kfree(it);
+  e = dir->as_dir.children;
+  while (e) {
+    if (strcmp(e->node->name, name) == 0) {
+      struct vtfs_node *n = e->node;
+
+      if (prev) prev->next = e->next;
+      else dir->as_dir.children = e->next;
+
+      // Free file data ONLY for files
+      if (n->type == VTFS_FILE && n->as_file.data)
+        kfree(n->as_file.data);
+
+      // If dir: should be empty checked by rmdir before calling remove
+      kfree(n);
+      kfree(e);
       return 0;
     }
-    prev = it;
-    it = it->next;
+    prev = e;
+    e = e->next;
   }
   return -ENOENT;
 }
 
 static void vtfs_node_free_tree(struct vtfs_node *n) {
-  struct vtfs_node *child, *next;
   if (!n) return;
 
-  child = n->children;
-  while (child) {
-    next = child->next;
-    vtfs_node_free_tree(child);
-    child = next;
+  if (n->type == VTFS_DIR) {
+    struct vtfs_child *e = n->as_dir.children;
+    while (e) {
+      struct vtfs_child *next = e->next;
+      vtfs_node_free_tree(e->node);
+      kfree(e);
+      e = next;
+    }
+  } else {
+    if (n->as_file.data) kfree(n->as_file.data);
   }
 
-  if (n->data) kfree(n->data);
   kfree(n);
 }
 
@@ -316,24 +359,21 @@ static int vtfs_rmdir(struct inode *parent_inode, struct dentry *child_dentry) {
     return -ENOTDIR;
   }
 
-  // Only allow removing empty directories
-  if (dir->children != NULL) {
+  if (dir->as_dir.children != NULL) {
     mutex_unlock(&vtfs_tree_lock);
     return -ENOTEMPTY;
   }
 
   rc = vtfs_node_remove_child(parent, name);
-  mutex_unlock(&vtfs_tree_lock);
 
+  mutex_unlock(&vtfs_tree_lock);
   return rc;
 }
 
 static int vtfs_iterate_shared(struct file *filp, struct dir_context *ctx) {
-  struct dentry *dentry = filp->f_path.dentry;
-  struct inode *inode = dentry->d_inode;
-
+  struct inode *inode = file_inode(filp);
   struct vtfs_node *dirnode = (struct vtfs_node *)inode->i_private;
-  struct vtfs_node *it;
+  struct vtfs_child *e;
   long idx;
 
   if (!dirnode || dirnode->type != VTFS_DIR)
@@ -342,30 +382,25 @@ static int vtfs_iterate_shared(struct file *filp, struct dir_context *ctx) {
   if (!dir_emit_dots(filp, ctx))
     return 0;
 
-  /*
-    ctx->pos:
-      0,1 are used by dots
-      starting from 2 -> our children list
-    We'll map child index = ctx->pos - 2
-  */
   mutex_lock(&vtfs_tree_lock);
 
-  idx = (long)ctx->pos - 2;
-  it = dirnode->children;
+  idx = (ctx->pos >= 2) ? (long)(ctx->pos - 2) : 0;
+  e = dirnode->as_dir.children;
 
-  while (it && idx > 0) {
-    it = it->next;
+  while (e && idx > 0) {
+    e = e->next;
     idx--;
   }
 
-  while (it) {
-    unsigned char ftype = (it->type == VTFS_DIR) ? DT_DIR : DT_REG;
+  while (e) {
+    struct vtfs_node *c = e->node;
+    unsigned char ftype = (c->type == VTFS_DIR) ? DT_DIR : DT_REG;
 
-    if (!dir_emit(ctx, it->name, strlen(it->name), it->ino, ftype))
+    if (!dir_emit(ctx, c->name, strlen(c->name), c->ino, ftype))
       break;
 
-    ctx->pos++;      // advance position per emitted entry
-    it = it->next;
+    ctx->pos++;
+    e = e->next;
   }
 
   mutex_unlock(&vtfs_tree_lock);
