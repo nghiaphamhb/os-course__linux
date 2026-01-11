@@ -12,6 +12,7 @@
 #include <linux/slab.h>     // kmalloc/kfree
 #include <linux/mutex.h>    // mutex
 #include <linux/string.h>   // strcmp/strlen
+#include <linux/fcntl.h>    // O_TRUNC
 
 #define MODULE_NAME "vtfs"
 #define VTFS_MAGIC 0x56544653  // "VTFS"
@@ -257,6 +258,9 @@ static struct dentry *vtfs_lookup(struct inode *parent_inode,
   d_add(child_dentry, inode);
   return NULL;
 }
+static ssize_t vtfs_read(struct file *filp, char __user *buffer, size_t len, loff_t *offset);
+static ssize_t vtfs_write(struct file *filp, const char __user *buffer, size_t len, loff_t *offset);
+static int vtfs_open(struct inode *inode, struct file *filp);
 
 static int vtfs_create(struct mnt_idmap *idmap,
                        struct inode *parent_inode,
@@ -445,6 +449,14 @@ static const struct file_operations vtfs_dir_ops = {
   .iterate_shared = vtfs_iterate_shared,
 };
 
+static const struct file_operations vtfs_file_ops = {
+  .owner = THIS_MODULE,
+  .open   = vtfs_open,
+  .read  = vtfs_read,
+  .write = vtfs_write,
+  .llseek = generic_file_llseek,
+};
+
 static const struct inode_operations vtfs_inode_ops = {
   .lookup  = vtfs_lookup,
   .create  = vtfs_create,
@@ -472,6 +484,7 @@ static struct inode *vtfs_get_inode(struct super_block *sb,
     inode->i_fop = &vtfs_dir_ops;
   } else {
     inode->i_op  = &vtfs_file_inode_ops;
+    inode->i_fop = &vtfs_file_ops; 
   }
 
   inode->i_ino = i_ino;
@@ -558,6 +571,102 @@ static void __exit vtfs_exit(void) {
     LOG("unregister_filesystem failed: %d\n", ret);
   }
   LOG("VTFS left the kernel\n");
+}
+
+static ssize_t vtfs_read(struct file *filp, char __user *buffer, size_t len, loff_t *offset) {
+  struct inode *inode = file_inode(filp);
+  struct vtfs_node *n = (struct vtfs_node *)inode->i_private;
+  size_t avail, nread;
+
+  if (!n || n->type != VTFS_FILE)
+    return -EINVAL;
+
+  mutex_lock(&vtfs_tree_lock);
+
+  if (*offset >= n->as_file.size) {
+    mutex_unlock(&vtfs_tree_lock);
+    return 0;
+  }
+
+  avail = n->as_file.size - (size_t)(*offset);
+  nread = (len < avail) ? len : avail;
+
+  if (nread == 0) {
+    mutex_unlock(&vtfs_tree_lock);
+    return 0;
+  }
+
+  if (n->as_file.data == NULL) {
+    mutex_unlock(&vtfs_tree_lock);
+    return 0;
+  }
+
+  if (copy_to_user(buffer, n->as_file.data + *offset, nread)) {
+    mutex_unlock(&vtfs_tree_lock);
+    return -EFAULT;
+  }
+
+  *offset += nread;
+  mutex_unlock(&vtfs_tree_lock);
+  return (ssize_t)nread;
+}
+
+static ssize_t vtfs_write(struct file *filp, const char __user *buffer, size_t len, loff_t *offset) {
+  struct inode *inode = file_inode(filp);
+  struct vtfs_node *n = (struct vtfs_node *)inode->i_private;
+  size_t new_end, new_cap;
+  char *new_data;
+
+  if (!n || n->type != VTFS_FILE)
+    return -EINVAL;
+
+  mutex_lock(&vtfs_tree_lock);
+
+  new_end = (size_t)(*offset) + len;
+  if (new_end < (size_t)(*offset)) {  // overflow guard
+    mutex_unlock(&vtfs_tree_lock);
+    return -EFBIG;
+  }
+
+  if (new_end > n->as_file.size) {
+    new_cap = new_end;
+    new_data = krealloc(n->as_file.data, new_cap, GFP_KERNEL);
+    if (!new_data) {
+      mutex_unlock(&vtfs_tree_lock);
+      return -ENOMEM;
+    }
+    n->as_file.data = new_data;
+    n->as_file.size = new_cap;
+  }
+
+  if (len > 0) {
+    if (copy_from_user(n->as_file.data + *offset, buffer, len)) {
+      mutex_unlock(&vtfs_tree_lock);
+      return -EFAULT;
+    }
+    *offset += len;
+  }
+
+  mutex_unlock(&vtfs_tree_lock);
+  return (ssize_t)len;
+}
+
+static int vtfs_open(struct inode *inode, struct file *filp) {
+  struct vtfs_node *n = (struct vtfs_node *)inode->i_private;
+
+  if (!n || n->type != VTFS_FILE)
+    return -EINVAL;
+
+  mutex_lock(&vtfs_tree_lock);
+
+  if (filp->f_flags & O_TRUNC) {
+    kfree(n->as_file.data);
+    n->as_file.data = NULL;
+    n->as_file.size = 0;
+  }
+
+  mutex_unlock(&vtfs_tree_lock);
+  return 0;
 }
 
 module_init(vtfs_init);
