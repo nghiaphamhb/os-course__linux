@@ -122,44 +122,50 @@ static int vtfs_node_add_child(struct vtfs_node *dir, struct vtfs_node *child) {
   return 0;
 }
 
-static struct vtfs_node *vtfs_node_find_child(struct vtfs_node *dir, const char *name) {
-  struct vtfs_child *e;
+static struct vtfs_child *vtfs_dir_find_entry(struct vtfs_node *dir,
+                                              const char *name,
+                                              struct vtfs_child **prev) {
+  struct vtfs_child *p = NULL, *e;
 
+  if (prev) *prev = NULL;
   if (!dir || dir->type != VTFS_DIR) return NULL;
 
   for (e = dir->as_dir.children; e; e = e->next) {
-    if (strcmp(e->node->name, name) == 0)
-      return e->node;
+    if (strcmp(e->node->name, name) == 0) {
+      if (prev) *prev = p;
+      return e;
+    }
+    p = e;
   }
   return NULL;
 }
 
+static struct vtfs_node *vtfs_node_find_child(struct vtfs_node *dir,
+                                              const char *name) {
+  struct vtfs_child *e = vtfs_dir_find_entry(dir, name, NULL);
+  return e ? e->node : NULL;
+}
+
 static int vtfs_node_remove_child(struct vtfs_node *dir, const char *name) {
-  struct vtfs_child *prev = NULL, *e;
+  struct vtfs_child *prev, *e;
+  struct vtfs_node *n;
 
   if (!dir || dir->type != VTFS_DIR) return -ENOTDIR;
 
-  e = dir->as_dir.children;
-  while (e) {
-    if (strcmp(e->node->name, name) == 0) {
-      struct vtfs_node *n = e->node;
+  e = vtfs_dir_find_entry(dir, name, &prev);
+  if (!e) return -ENOENT;
 
-      if (prev) prev->next = e->next;
-      else dir->as_dir.children = e->next;
+  if (prev) prev->next = e->next;
+  else dir->as_dir.children = e->next;
 
-      // Free file data ONLY for files
-      if (n->type == VTFS_FILE && n->as_file.data)
-        kfree(n->as_file.data);
+  n = e->node;
 
-      // If dir: should be empty checked by rmdir before calling remove
-      kfree(n);
-      kfree(e);
-      return 0;
-    }
-    prev = e;
-    e = e->next;
-  }
-  return -ENOENT;
+  if (n->type == VTFS_FILE && n->as_file.data)
+    kfree(n->as_file.data);
+
+  kfree(n);
+  kfree(e);
+  return 0;
 }
 
 static void vtfs_node_free_tree(struct vtfs_node *n) {
