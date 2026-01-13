@@ -13,9 +13,11 @@
 #include <linux/mutex.h>    // mutex
 #include <linux/string.h>   // strcmp/strlen
 #include <linux/fcntl.h>    // O_TRUNC
+#include "http.h"
 
 #define MODULE_NAME "vtfs"
 #define VTFS_MAGIC 0x56544653  // "VTFS"
+#define VTFS_TOKEN "TODO"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("secs-dev");
@@ -593,6 +595,23 @@ static int __init vtfs_init(void) {
     vtfs_backend_destroy();
     return ret;
   }
+
+  // --- ping test (only for debug) ---
+  {
+    char resp[64];
+    int64_t code;
+
+    memset(resp, 0, sizeof(resp));
+
+    code = vtfs_http_call("TODO", "ping", resp, sizeof(resp) - 1, 0);
+
+    if (code == 0) {
+      LOG("ping ok, payload='%s'\n", resp);
+    } else {
+      LOG("ping failed, code=%lld\n", (long long)code);
+    }
+  }
+  // --- end ping test ---
 
   LOG("VTFS joined the kernel\n");
   return 0;

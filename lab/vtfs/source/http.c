@@ -1,6 +1,16 @@
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/stdarg.h>
+#include <linux/uio.h>
+#include <linux/net.h>
+#include <linux/in.h>
+#include <linux/socket.h>
+#include <net/sock.h>
+#include <linux/errno.h>
 #include "http.h"
 
-const char *SERVER_IP = "0.0.0.0";
+const char *SERVER_IP = "127.0.0.1";
 const int SERVER_PORT = 8080;
 
 // callee should call free_request on received buffer
