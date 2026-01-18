@@ -20,7 +20,8 @@ MODULE_DESCRIPTION("A simple FS kernel module");
 
 #define MODULE_NAME "vtfs"
 #define VTFS_MAGIC 0x56544653  // "VTFS"
-#define VTFS_TOKEN "TODO"
+// Token passed via mount source argument (e.g., mount -t vtfs TOKEN /mnt/vt)
+static char vtfs_token[128] = "TODO";
 #define LOG(fmt, ...) pr_info("[" MODULE_NAME "]: " fmt, ##__VA_ARGS__)
 
 struct vtfs_remote_info {
@@ -47,7 +48,7 @@ static int vtfs_api_list(ino_t parent, char *out, size_t out_sz) {
   snprintf(parent_s, sizeof(parent_s), "%lu", (unsigned long)parent);
 
   memset(out, 0, out_sz);
-  return (int)vtfs_http_call(VTFS_TOKEN, "list", out, out_sz - 1, 1,
+  return (int)vtfs_http_call(vtfs_token, "list", out, out_sz - 1, 1,
                              "parent", parent_s);
 }
 
@@ -60,7 +61,7 @@ static int vtfs_api_lookup(ino_t parent, const char *name,
   encode(name, enc_name);
 
   memset(out, 0, out_sz);
-  return (int)vtfs_http_call(VTFS_TOKEN, "lookup", out, out_sz - 1, 2,
+  return (int)vtfs_http_call(vtfs_token, "lookup", out, out_sz - 1, 2,
                              "parent", parent_s,
                              "name", enc_name);
 }
@@ -72,7 +73,7 @@ static int vtfs_api_create(ino_t parent, const char *name, umode_t mode,
   snprintf(mode_s, sizeof(mode_s), "%u", (unsigned int)mode);
   encode(name, enc_name);
   memset(out, 0, out_sz);
-  return (int)vtfs_http_call(VTFS_TOKEN, "create", out, out_sz - 1, 3,
+  return (int)vtfs_http_call(vtfs_token, "create", out, out_sz - 1, 3,
                              "parent", parent_s,
                              "name", enc_name,
                              "mode", mode_s);
@@ -85,7 +86,7 @@ static int vtfs_api_mkdir(ino_t parent, const char *name, umode_t mode,
   snprintf(mode_s, sizeof(mode_s), "%u", (unsigned int)mode);
   encode(name, enc_name);
   memset(out, 0, out_sz);
-  return (int)vtfs_http_call(VTFS_TOKEN, "mkdir", out, out_sz - 1, 3,
+  return (int)vtfs_http_call(vtfs_token, "mkdir", out, out_sz - 1, 3,
                              "parent", parent_s,
                              "name", enc_name,
                              "mode", mode_s);
@@ -96,7 +97,7 @@ static int vtfs_api_rmdir(ino_t parent, const char *name) {
   snprintf(parent_s, sizeof(parent_s), "%lu", (unsigned long)parent);
   encode(name, enc_name);
   memset(resp, 0, sizeof(resp));
-  return (int)vtfs_http_call(VTFS_TOKEN, "rmdir", resp, sizeof(resp) - 1, 2,
+  return (int)vtfs_http_call(vtfs_token, "rmdir", resp, sizeof(resp) - 1, 2,
                              "parent", parent_s,
                              "name", enc_name);
 }
@@ -106,7 +107,7 @@ static int vtfs_api_unlink(ino_t parent, const char *name) {
   snprintf(parent_s, sizeof(parent_s), "%lu", (unsigned long)parent);
   encode(name, enc_name);
   memset(resp, 0, sizeof(resp));
-  return (int)vtfs_http_call(VTFS_TOKEN, "unlink", resp, sizeof(resp)-1, 2,
+  return (int)vtfs_http_call(vtfs_token, "unlink", resp, sizeof(resp)-1, 2,
                              "parent", parent_s,
                              "name", enc_name);
 }
@@ -117,7 +118,7 @@ static int vtfs_api_read(ino_t ino, loff_t off, size_t len, char *out, size_t ou
   snprintf(off_s, sizeof(off_s), "%lld", (long long)off);
   snprintf(len_s, sizeof(len_s), "%lu", (unsigned long)len);
   memset(out, 0, out_sz);
-  return (int)vtfs_http_call(VTFS_TOKEN, "read", out, out_sz, 3,
+  return (int)vtfs_http_call(vtfs_token, "read", out, out_sz, 3,
                              "ino", ino_s, "off", off_s, "len", len_s);
 }
 
@@ -125,7 +126,7 @@ static int vtfs_api_truncate(ino_t ino) {
   char ino_s[32], resp[64];
   snprintf(ino_s, sizeof(ino_s), "%lu", (unsigned long)ino);
   memset(resp, 0, sizeof(resp));
-  return (int)vtfs_http_call(VTFS_TOKEN, "truncate", resp, sizeof(resp) - 1, 1,
+  return (int)vtfs_http_call(vtfs_token, "truncate", resp, sizeof(resp) - 1, 1,
                              "ino", ino_s);
 }
 
@@ -134,7 +135,7 @@ static int vtfs_api_write_b64url(ino_t ino, loff_t off, const char *b64url) {
   snprintf(ino_s, sizeof(ino_s), "%lu", (unsigned long)ino);
   snprintf(off_s, sizeof(off_s), "%lld", (long long)off);
   memset(resp, 0, sizeof(resp));
-  return (int)vtfs_http_call(VTFS_TOKEN, "write", resp, sizeof(resp) - 1, 3,
+  return (int)vtfs_http_call(vtfs_token, "write", resp, sizeof(resp) - 1, 3,
                              "ino", ino_s, "off", off_s, "data", b64url);
 }
 
@@ -147,7 +148,7 @@ static int vtfs_api_link(ino_t old_ino, ino_t parent, const char *name,
   encode(name, enc_name);
 
   memset(out, 0, out_sz);
-  return (int)vtfs_http_call(VTFS_TOKEN, "link", out, out_sz - 1, 3,
+  return (int)vtfs_http_call(vtfs_token, "link", out, out_sz - 1, 3,
                              "old_ino", old_s,
                              "parent", parent_s,
                              "name", enc_name);
@@ -213,6 +214,37 @@ static int vtfs_b64url_encode(const u8 *in, size_t inlen, char **outp)
 
   *outp = b64; // caller must kfree()
   return 0;
+}
+
+static void vtfs_parse_mount_opts(void *data)
+{
+  if (!data)
+    return;
+
+  // mount -o ip=...,port=...
+  char *opts = kstrdup(data, GFP_KERNEL);
+  if (!opts)
+    return;
+
+  char *p = opts;
+  char *tok;
+
+  while ((tok = strsep(&p, ",")) != NULL) {
+    if (*tok == '\0')
+      continue;
+
+    if (strncmp(tok, "ip=", 3) == 0) {
+      const char *ip = tok + 3;
+      if (*ip)
+        strscpy(SERVER_IP, ip, sizeof(SERVER_IP));
+    } else if (strncmp(tok, "port=", 5) == 0) {
+      int port = 0;
+      if (kstrtoint(tok + 5, 10, &port) == 0 && port > 0 && port <= 65535)
+        SERVER_PORT = port;
+    }
+  }
+
+  kfree(opts);
 }
 
 // Super ops + inode lifecycle
@@ -588,6 +620,18 @@ static ssize_t vtfs_write(struct file *filp, const char __user *buffer,
   return (ssize_t)done;
 }
 
+static int vtfs_fsync(struct file *filp, loff_t start, loff_t end, int datasync)
+{
+  (void)filp;
+  (void)start;
+  (void)end;
+  (void)datasync;
+
+  // Minimal: make vim happy (it calls fsync after :w)
+  // Our writes are already synchronous via HTTP, so returning 0 is acceptable for the lab.
+  return 0;
+}
+
 // ops tables
 static const struct file_operations vtfs_dir_ops = {
   .owner = THIS_MODULE,
@@ -599,6 +643,7 @@ static const struct file_operations vtfs_file_ops = {
   .open   = vtfs_open,
   .read   = vtfs_read,
   .write  = vtfs_write,
+  .fsync  = vtfs_fsync,
   .llseek = generic_file_llseek,
 };
 
@@ -640,7 +685,9 @@ static struct inode *vtfs_get_inode(struct super_block *sb,
 }
 
 static int vtfs_fill_super(struct super_block *sb, void *data, int silent) {
-  (void)data; (void)silent;
+  (void)silent;
+
+  vtfs_parse_mount_opts(data);
 
   sb->s_magic = VTFS_MAGIC;
   sb->s_op = &vtfs_super_ops;
@@ -665,13 +712,16 @@ static int vtfs_fill_super(struct super_block *sb, void *data, int silent) {
 
 static struct dentry *vtfs_mount(struct file_system_type *fs_type, int flags,
                                  const char *token, void *data) {
-  (void)token;
+  if (token && *token) {
+    strscpy(vtfs_token, token, sizeof(vtfs_token));
+  }
 
   struct dentry *ret = mount_nodev(fs_type, flags, data, vtfs_fill_super);
   if (ret == NULL) {
     LOG("Can't mount file system\n");
   } else {
-    LOG("Mounted successfully\n");
+    LOG("Mounted successfully (token=%s, ip=%s, port=%d)\n",
+        vtfs_token, SERVER_IP, SERVER_PORT);
   }
   return ret;
 }

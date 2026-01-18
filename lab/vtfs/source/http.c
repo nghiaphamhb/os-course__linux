@@ -10,8 +10,9 @@
 #include <linux/errno.h>
 #include "http.h"
 
-const char *SERVER_IP = "127.0.0.1";
-const int SERVER_PORT = 8080;
+// Configurable at mount time via vtfs.c
+char SERVER_IP[64] = "127.0.0.1";
+int SERVER_PORT = 8080;
 
 // callee should call free_request on received buffer
 static int fill_request(struct kvec *vec, const char *token, const char *method,
