@@ -1,10 +1,21 @@
+#include <linux/kernel.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/stdarg.h>
+#include <linux/uio.h>
+#include <linux/net.h>
+#include <linux/in.h>
+#include <linux/socket.h>
+#include <net/sock.h>
+#include <linux/errno.h>
 #include "http.h"
 
-const char *SERVER_IP = "0.0.0.0";
-const int SERVER_PORT = 8080;
+// Configurable at mount time via vtfs.c
+char SERVER_IP[64] = "127.0.0.1";
+int SERVER_PORT = 8080;
 
 // callee should call free_request on received buffer
-int fill_request(struct kvec *vec, const char *token, const char *method,
+static int fill_request(struct kvec *vec, const char *token, const char *method,
                  size_t arg_size, va_list args) {
   // 2048 bytes for URL and 64 bytes for anything else
   char *request_buffer = kzalloc(2048 + 64, GFP_KERNEL);
@@ -36,7 +47,7 @@ int fill_request(struct kvec *vec, const char *token, const char *method,
   return 0;
 }
 
-int receive_all(struct socket *sock, char *buffer, size_t buffer_size) {
+static int receive_all(struct socket *sock, char *buffer, size_t buffer_size) {
   struct msghdr hdr;
   struct kvec vec;
 
@@ -59,7 +70,7 @@ int receive_all(struct socket *sock, char *buffer, size_t buffer_size) {
   return read;
 }
 
-int64_t parse_http_response(char *raw_response, size_t raw_response_size,
+static int64_t parse_http_response(char *raw_response, size_t raw_response_size,
                             char *response, size_t response_size) {
   char *buffer = raw_response;
 

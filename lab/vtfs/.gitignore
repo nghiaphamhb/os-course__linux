@@ -16,3 +16,6 @@ modules.order
 # Clangd
 compile_commands.json
 .cache/
+
+#nodejs
+vtfs-server/node_modules/
